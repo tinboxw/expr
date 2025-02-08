@@ -258,45 +258,6 @@ func String(arg any) any {
 	return fmt.Sprintf("%v", arg)
 }
 
-func sum(args ...any) (any, error) {
-	var total int
-	var fTotal float64
-
-	for _, arg := range args {
-		rv := reflect.ValueOf(deref.Deref(arg))
-
-		switch rv.Kind() {
-		case reflect.Array, reflect.Slice:
-			size := rv.Len()
-			for i := 0; i < size; i++ {
-				elemSum, err := sum(rv.Index(i).Interface())
-				if err != nil {
-					return nil, err
-				}
-				switch elemSum := elemSum.(type) {
-				case int:
-					total += elemSum
-				case float64:
-					fTotal += elemSum
-				}
-			}
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			total += int(rv.Int())
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			total += int(rv.Uint())
-		case reflect.Float32, reflect.Float64:
-			fTotal += rv.Float()
-		default:
-			return nil, fmt.Errorf("invalid argument for sum (type %T)", arg)
-		}
-	}
-
-	if fTotal != 0.0 {
-		return fTotal + float64(total), nil
-	}
-	return total, nil
-}
-
 func minMax(name string, fn func(any, any) bool, args ...any) (any, error) {
 	var val any
 	for _, arg := range args {
@@ -397,4 +358,18 @@ func median(args ...any) ([]float64, error) {
 		}
 	}
 	return values, nil
+}
+
+func flatten(arg reflect.Value) []any {
+	ret := []any{}
+	for i := 0; i < arg.Len(); i++ {
+		v := deref.Value(arg.Index(i))
+		if v.Kind() == reflect.Array || v.Kind() == reflect.Slice {
+			x := flatten(v)
+			ret = append(ret, x...)
+		} else {
+			ret = append(ret, v.Interface())
+		}
+	}
+	return ret
 }

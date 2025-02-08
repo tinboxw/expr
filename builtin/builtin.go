@@ -85,6 +85,11 @@ var Builtins = []*Function{
 		Types:     types(new(func([]any, func(any) bool) int)),
 	},
 	{
+		Name:      "sum",
+		Predicate: true,
+		Types:     types(new(func([]any, func(any) bool) int)),
+	},
+	{
 		Name:      "groupBy",
 		Predicate: true,
 		Types:     types(new(func([]any, func(any) any) map[any][]any)),
@@ -447,13 +452,6 @@ var Builtins = []*Function{
 		},
 	},
 	{
-		Name: "sum",
-		Func: sum,
-		Validate: func(args []reflect.Type) (reflect.Type, error) {
-			return validateAggregateFunc("sum", args)
-		},
-	},
-	{
 		Name: "mean",
 		Func: func(args ...any) (any, error) {
 			count, sum, err := mean(args...)
@@ -533,9 +531,27 @@ var Builtins = []*Function{
 	{
 		Name: "now",
 		Func: func(args ...any) (any, error) {
-			return time.Now(), nil
+			if len(args) == 0 {
+				return time.Now(), nil
+			}
+			if len(args) == 1 {
+				if tz, ok := args[0].(*time.Location); ok {
+					return time.Now().In(tz), nil
+				}
+			}
+			return nil, fmt.Errorf("invalid number of arguments (expected 0, got %d)", len(args))
 		},
-		Types: types(new(func() time.Time)),
+		Validate: func(args []reflect.Type) (reflect.Type, error) {
+			if len(args) == 0 {
+				return timeType, nil
+			}
+			if len(args) == 1 {
+				if args[0] != nil && args[0].AssignableTo(locationType) {
+					return timeType, nil
+				}
+			}
+			return anyType, fmt.Errorf("invalid number of arguments (expected 0, got %d)", len(args))
+		},
 	},
 	{
 		Name: "duration",
@@ -547,9 +563,17 @@ var Builtins = []*Function{
 	{
 		Name: "date",
 		Func: func(args ...any) (any, error) {
+			tz, ok := args[0].(*time.Location)
+			if ok {
+				args = args[1:]
+			}
+
 			date := args[0].(string)
 			if len(args) == 2 {
 				layout := args[1].(string)
+				if tz != nil {
+					return time.ParseInLocation(layout, date, tz)
+				}
 				return time.Parse(layout, date)
 			}
 			if len(args) == 3 {
@@ -576,18 +600,43 @@ var Builtins = []*Function{
 				time.RFC1123,
 			}
 			for _, layout := range layouts {
-				t, err := time.Parse(layout, date)
-				if err == nil {
-					return t, nil
+				if tz == nil {
+					t, err := time.Parse(layout, date)
+					if err == nil {
+						return t, nil
+					}
+				} else {
+					t, err := time.ParseInLocation(layout, date, tz)
+					if err == nil {
+						return t, nil
+					}
 				}
 			}
 			return nil, fmt.Errorf("invalid date %s", date)
 		},
-		Types: types(
-			new(func(string) time.Time),
-			new(func(string, string) time.Time),
-			new(func(string, string, string) time.Time),
-		),
+		Validate: func(args []reflect.Type) (reflect.Type, error) {
+			if len(args) < 1 {
+				return anyType, fmt.Errorf("invalid number of arguments (expected at least 1, got %d)", len(args))
+			}
+			if args[0] != nil && args[0].AssignableTo(locationType) {
+				args = args[1:]
+			}
+			if len(args) > 3 {
+				return anyType, fmt.Errorf("invalid number of arguments (expected at most 3, got %d)", len(args))
+			}
+			return timeType, nil
+		},
+	},
+	{
+		Name: "timezone",
+		Func: func(args ...any) (any, error) {
+			tz, err := time.LoadLocation(args[0].(string))
+			if err != nil {
+				return nil, err
+			}
+			return tz, nil
+		},
+		Types: types(time.LoadLocation),
 	},
 	{
 		Name: "first",
@@ -840,6 +889,57 @@ var Builtins = []*Function{
 			}
 		},
 	},
+
+	{
+		Name: "uniq",
+		Func: func(args ...any) (any, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("invalid number of arguments (expected 1, got %d)", len(args))
+			}
+
+			v := reflect.ValueOf(deref.Deref(args[0]))
+			if v.Kind() != reflect.Array && v.Kind() != reflect.Slice {
+				return nil, fmt.Errorf("cannot uniq %s", v.Kind())
+			}
+
+			size := v.Len()
+			ret := []any{}
+
+			eq := func(i int) bool {
+				for _, r := range ret {
+					if runtime.Equal(v.Index(i).Interface(), r) {
+						return true
+					}
+				}
+
+				return false
+			}
+
+			for i := 0; i < size; i += 1 {
+				if eq(i) {
+					continue
+				}
+
+				ret = append(ret, v.Index(i).Interface())
+			}
+
+			return ret, nil
+		},
+
+		Validate: func(args []reflect.Type) (reflect.Type, error) {
+			if len(args) != 1 {
+				return anyType, fmt.Errorf("invalid number of arguments (expected 1, got %d)", len(args))
+			}
+
+			switch kind(args[0]) {
+			case reflect.Interface, reflect.Slice, reflect.Array:
+				return arrayType, nil
+			default:
+				return anyType, fmt.Errorf("cannot uniq %s", args[0])
+			}
+		},
+	},
+
 	{
 		Name: "concat",
 		Safe: func(args ...any) (any, uint, error) {
@@ -877,6 +977,37 @@ var Builtins = []*Function{
 				case reflect.Interface, reflect.Slice, reflect.Array:
 				default:
 					return anyType, fmt.Errorf("cannot concat %s", arg)
+				}
+			}
+
+			return arrayType, nil
+		},
+	},
+	{
+		Name: "flatten",
+		Safe: func(args ...any) (any, uint, error) {
+			var size uint
+			if len(args) != 1 {
+				return nil, 0, fmt.Errorf("invalid number of arguments (expected 1, got %d)", len(args))
+			}
+			v := reflect.ValueOf(deref.Deref(args[0]))
+			if v.Kind() != reflect.Array && v.Kind() != reflect.Slice {
+				return nil, size, fmt.Errorf("cannot flatten %s", v.Kind())
+			}
+			ret := flatten(v)
+			size = uint(len(ret))
+			return ret, size, nil
+		},
+		Validate: func(args []reflect.Type) (reflect.Type, error) {
+			if len(args) != 1 {
+				return anyType, fmt.Errorf("invalid number of arguments (expected 1, got %d)", len(args))
+			}
+
+			for _, arg := range args {
+				switch kind(deref.Type(arg)) {
+				case reflect.Interface, reflect.Slice, reflect.Array:
+				default:
+					return anyType, fmt.Errorf("cannot flatten %s", arg)
 				}
 			}
 

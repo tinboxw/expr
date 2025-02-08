@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/expr-lang/expr/internal/testify/assert"
+	"github.com/expr-lang/expr/internal/testify/require"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/test/mock"
@@ -77,7 +77,7 @@ func TestOperator_Function(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(fmt.Sprintf(`opertor function helper test %s`, tt.input), func(t *testing.T) {
+		t.Run(fmt.Sprintf(`operator function helper test %s`, tt.input), func(t *testing.T) {
 			program, err := expr.Compile(
 				tt.input,
 				expr.Env(env),
@@ -148,7 +148,7 @@ func TestOperator_FunctionOverTypesPrecedence(t *testing.T) {
 		expr.Env(env),
 		expr.Operator("+", "Add"),
 		expr.Function("Add", func(args ...interface{}) (interface{}, error) {
-			// Wierd function that returns 100 + a + b in testing purposes.
+			// Weird function that returns 100 + a + b for testing purposes.
 			return args[0].(int) + args[1].(int) + 100, nil
 		},
 			new(func(_ int, __ int) int),

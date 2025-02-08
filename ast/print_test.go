@@ -3,8 +3,8 @@ package ast_test
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/expr-lang/expr/internal/testify/assert"
+	"github.com/expr-lang/expr/internal/testify/require"
 
 	"github.com/expr-lang/expr/ast"
 	"github.com/expr-lang/expr/parser"
@@ -55,8 +55,12 @@ func TestPrint(t *testing.T) {
 		{`func(a)`, `func(a)`},
 		{`func(a, b)`, `func(a, b)`},
 		{`{}`, `{}`},
-		{`{a: b}`, `{"a": b}`},
-		{`{a: b, c: d}`, `{"a": b, "c": d}`},
+		{`{a: b}`, `{a: b}`},
+		{`{a: b, c: d}`, `{a: b, c: d}`},
+		{`{"a": b, 'c': d}`, `{a: b, c: d}`},
+		{`{"a": b, c: d}`, `{a: b, c: d}`},
+		{`{"a": b, 8: 8}`, `{a: b, "8": 8}`},
+		{`{"9": 9, '8': 8, "foo": d}`, `{"9": 9, "8": 8, foo: d}`},
 		{`[]`, `[]`},
 		{`[a]`, `[a]`},
 		{`[a, b]`, `[a, b]`},
@@ -71,6 +75,9 @@ func TestPrint(t *testing.T) {
 		{`a[1:]`, `a[1:]`},
 		{`a[:]`, `a[:]`},
 		{`(nil ?? 1) > 0`, `(nil ?? 1) > 0`},
+		{`{("a" + "b"): 42}`, `{("a" + "b"): 42}`},
+		{`(One == 1 ? true : false) && Two == 2`, `(One == 1 ? true : false) && Two == 2`},
+		{`not (a == 1 ? b > 1 : b < 2)`, `not (a == 1 ? b > 1 : b < 2)`},
 	}
 
 	for _, tt := range tests {
