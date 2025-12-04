@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/expr-lang/expr/builtin"
+	"github.com/expr-lang/expr/conf"
 	"github.com/expr-lang/expr/file"
 	"github.com/expr-lang/expr/internal/deref"
 	"github.com/expr-lang/expr/vm/runtime"
@@ -20,7 +21,6 @@ func Run(program *Program, env any) (any, error) {
 	if program == nil {
 		return nil, fmt.Errorf("program is nil")
 	}
-
 	vm := VM{}
 	return vm.Run(program, env)
 }
@@ -38,9 +38,9 @@ type VM struct {
 	Stack        []any
 	Scopes       []*Scope
 	Variables    []any
+	MemoryBudget uint
 	ip           int
 	memory       uint
-	memoryBudget uint
 	debug        bool
 	step         chan struct{}
 	curr         chan int
@@ -67,16 +67,19 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 	if vm.Stack == nil {
 		vm.Stack = make([]any, 0, 2)
 	} else {
+		clearSlice(vm.Stack)
 		vm.Stack = vm.Stack[0:0]
 	}
 	if vm.Scopes != nil {
+		clearSlice(vm.Scopes)
 		vm.Scopes = vm.Scopes[0:0]
 	}
 	if len(vm.Variables) < program.variables {
 		vm.Variables = make([]any, program.variables)
 	}
-
-	vm.memoryBudget = MemoryBudget
+	if vm.MemoryBudget == 0 {
+		vm.MemoryBudget = conf.DefaultMemoryBudget
+	}
 	vm.memory = 0
 	vm.ip = 0
 
@@ -332,10 +335,8 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 			in := make([]reflect.Value, size)
 			for i := int(size) - 1; i >= 0; i-- {
 				param := vm.pop()
-				if param == nil && reflect.TypeOf(param) == nil {
-					// In case of nil value and nil type use this hack,
-					// otherwise reflect.Call will panic on zero value.
-					in[i] = reflect.ValueOf(&param).Elem()
+				if param == nil {
+					in[i] = reflect.Zero(fn.Type().In(i))
 				} else {
 					in[i] = reflect.ValueOf(param)
 				}
@@ -457,7 +458,7 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 
 		case OpDeref:
 			a := vm.pop()
-			vm.push(deref.Deref(a))
+			vm.push(deref.Interface(a))
 
 		case OpIncrementIndex:
 			vm.scope().Index++
@@ -599,7 +600,7 @@ func (vm *VM) pop() any {
 
 func (vm *VM) memGrow(size uint) {
 	vm.memory += size
-	if vm.memory >= vm.memoryBudget {
+	if vm.memory >= vm.MemoryBudget {
 		panic("memory budget exceeded")
 	}
 }
@@ -614,4 +615,11 @@ func (vm *VM) Step() {
 
 func (vm *VM) Position() chan int {
 	return vm.curr
+}
+
+func clearSlice[S ~[]E, E any](s S) {
+	var zero E
+	for i := range s {
+		s[i] = zero // clear mem, optimized by the compiler, in Go 1.21 the "clear" builtin can be used
+	}
 }

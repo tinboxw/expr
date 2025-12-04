@@ -10,6 +10,14 @@ import (
 	"github.com/expr-lang/expr/vm/runtime"
 )
 
+var (
+	// DefaultMemoryBudget represents default maximum allowed memory usage by the vm.VM.
+	DefaultMemoryBudget uint = 1e6
+
+	// DefaultMaxNodes represents default maximum allowed AST nodes by the compiler.
+	DefaultMaxNodes uint = 1e4
+)
+
 type FunctionsTable map[string]*builtin.Function
 
 type Config struct {
@@ -20,17 +28,20 @@ type Config struct {
 	Optimize  bool
 	Strict    bool
 	Profile   bool
+	MaxNodes  uint
 	ConstFns  map[string]reflect.Value
 	Visitors  []ast.Visitor
 	Functions FunctionsTable
 	Builtins  FunctionsTable
 	Disabled  map[string]bool // disabled builtins
+	NtCache   nature.Cache
 }
 
 // CreateNew creates new config with default values.
 func CreateNew() *Config {
 	c := &Config{
 		Optimize:  true,
+		MaxNodes:  DefaultMaxNodes,
 		ConstFns:  make(map[string]reflect.Value),
 		Functions: make(map[string]*builtin.Function),
 		Builtins:  make(map[string]*builtin.Function),
@@ -50,9 +61,9 @@ func New(env any) *Config {
 }
 
 func (c *Config) WithEnv(env any) {
-	c.Strict = true
 	c.EnvObject = env
-	c.Env = Env(env)
+	c.Env = EnvWithCache(&c.NtCache, env)
+	c.Strict = c.Env.Strict
 }
 
 func (c *Config) ConstExpr(name string) {
@@ -82,7 +93,7 @@ func (c *Config) IsOverridden(name string) bool {
 	if _, ok := c.Functions[name]; ok {
 		return true
 	}
-	if _, ok := c.Env.Get(name); ok {
+	if _, ok := c.Env.Get(&c.NtCache, name); ok {
 		return true
 	}
 	return false

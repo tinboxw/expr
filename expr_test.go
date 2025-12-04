@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/expr-lang/expr/conf"
 	"github.com/expr-lang/expr/internal/testify/assert"
 	"github.com/expr-lang/expr/internal/testify/require"
 	"github.com/expr-lang/expr/types"
+	"github.com/expr-lang/expr/vm"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/ast"
@@ -137,7 +140,86 @@ func ExampleEnv_tagged_field_names() {
 
 	fmt.Printf("%v", output)
 
-	// Output : Hello World
+	// Output: Hello World
+}
+
+func ExampleEnv_hidden_tagged_field_names() {
+	type Internal struct {
+		Visible string
+		Hidden  string `expr:"-"`
+	}
+	type environment struct {
+		Visible         string
+		Hidden          string   `expr:"-"`
+		HiddenInternal  Internal `expr:"-"`
+		VisibleInternal Internal
+	}
+
+	env := environment{
+		Hidden: "First level secret",
+		HiddenInternal: Internal{
+			Visible: "Second level secret",
+			Hidden:  "Also hidden",
+		},
+		VisibleInternal: Internal{
+			Visible: "Not a secret",
+			Hidden:  "Hidden too",
+		},
+	}
+
+	hiddenValues := []string{
+		`Hidden`,
+		`HiddenInternal`,
+		`HiddenInternal.Visible`,
+		`HiddenInternal.Hidden`,
+		`VisibleInternal["Hidden"]`,
+	}
+	for _, expression := range hiddenValues {
+		output, err := expr.Eval(expression, env)
+		if err == nil || !strings.Contains(err.Error(), "cannot fetch") {
+			fmt.Printf("unexpected output: %v; err: %v\n", output, err)
+			return
+		}
+		fmt.Printf("%q is hidden as expected\n", expression)
+	}
+
+	visibleValues := []string{
+		`Visible`,
+		`VisibleInternal`,
+		`VisibleInternal["Visible"]`,
+	}
+	for _, expression := range visibleValues {
+		_, err := expr.Eval(expression, env)
+		if err != nil {
+			fmt.Printf("unexpected error: %v\n", err)
+			return
+		}
+		fmt.Printf("%q is visible as expected\n", expression)
+	}
+
+	testWithIn := []string{
+		`not ("Hidden" in $env)`,
+		`"Visible" in $env`,
+		`not ("Hidden" in VisibleInternal)`,
+		`"Visible" in VisibleInternal`,
+	}
+	for _, expression := range testWithIn {
+		val, err := expr.Eval(expression, env)
+		shouldBeTrue, ok := val.(bool)
+		if err != nil || !ok || !shouldBeTrue {
+			fmt.Printf("unexpected result; value: %v; error: %v\n", val, err)
+			return
+		}
+	}
+
+	// Output: "Hidden" is hidden as expected
+	// "HiddenInternal" is hidden as expected
+	// "HiddenInternal.Visible" is hidden as expected
+	// "HiddenInternal.Hidden" is hidden as expected
+	// "VisibleInternal[\"Hidden\"]" is hidden as expected
+	// "Visible" is visible as expected
+	// "VisibleInternal" is visible as expected
+	// "VisibleInternal[\"Visible\"]" is visible as expected
 }
 
 func ExampleAsKind() {
@@ -312,7 +394,7 @@ func ExampleOperator() {
 	// Output: true
 }
 
-func ExampleOperator_Decimal() {
+func ExampleOperator_with_decimal() {
 	type Decimal struct{ N float64 }
 	code := `A + B - C`
 
@@ -504,20 +586,6 @@ func (p *patcher) Visit(node *ast.Node) {
 }
 
 func ExamplePatch() {
-	/*
-		type patcher struct{}
-
-		func (p *patcher) Visit(node *ast.Node) {
-			switch n := (*node).(type) {
-			case *ast.MemberNode:
-				ast.Patch(node, &ast.CallNode{
-					Callee:    &ast.IdentifierNode{Value: "get"},
-					Arguments: []ast.Node{n.Node, n.Property},
-				})
-			}
-		}
-	*/
-
 	program, err := expr.Compile(
 		`greet.you.world + "!"`,
 		expr.Patch(&patcher{}),
@@ -541,7 +609,7 @@ func ExamplePatch() {
 	}
 	fmt.Printf("%v", output)
 
-	// Output : Hello, you, world!
+	// Output: Hello, you, world!
 }
 
 func ExampleWithContext() {
@@ -585,7 +653,7 @@ func ExampleWithContext() {
 	// Output: 42
 }
 
-func ExampleWithTimezone() {
+func ExampleTimezone() {
 	program, err := expr.Compile(`now().Location().String()`, expr.Timezone("Asia/Kamchatka"))
 	if err != nil {
 		fmt.Printf("%v", err)
@@ -872,6 +940,18 @@ func TestExpr(t *testing.T) {
 			12,
 		},
 		{
+			`len('北京')`,
+			2,
+		},
+		{
+			`len('👍🏻')`, // one grapheme cluster, two code points
+			2,
+		},
+		{
+			`len('👍')`, // one grapheme cluster, one code point
+			1,
+		},
+		{
 			`len(ArrayOfInt)`,
 			5,
 		},
@@ -1108,6 +1188,10 @@ func TestExpr(t *testing.T) {
 			time.Hour + time.Minute,
 		},
 		{
+			`duration("1h") - duration("1m")`,
+			time.Hour - time.Minute,
+		},
+		{
 			`7 * duration("1h")`,
 			7 * time.Hour,
 		},
@@ -1290,6 +1374,29 @@ func TestExpr(t *testing.T) {
 		{
 			`1 < 2 < 3 == true`,
 			true,
+		},
+		{
+			`if 1 > 2 { 333 * 2 + 1 } else { 444 }`,
+			444,
+		},
+		{
+			`let a = 3;
+			let b = 2;
+			if a>b {let c = Add(a, b); c+1} else {Add(10, b)}
+			`,
+			6,
+		},
+		{
+			`if "a" < "b" {let x = "a"; x} else {"abc"}`,
+			"a",
+		},
+		{
+			`1; 2; 3`,
+			3,
+		},
+		{
+			`let a = 1; Add(2, 2); let b = 2; a + b`,
+			3,
 		},
 	}
 
@@ -1645,9 +1752,20 @@ func TestEval_exposed_error(t *testing.T) {
 
 	fileError, ok := err.(*file.Error)
 	require.True(t, ok, "error should be of type *file.Error")
-	require.Equal(t, "integer divide by zero (1:3)\n | 1 % 0\n | ..^", fileError.Error())
+	require.Equal(t, "runtime error: integer divide by zero (1:3)\n | 1 % 0\n | ..^", fileError.Error())
 	require.Equal(t, 2, fileError.Column)
 	require.Equal(t, 1, fileError.Line)
+}
+
+func TestCompile_exposed_error_with_multiline_script(t *testing.T) {
+	_, err := expr.Compile("{\n\ta: 1,\n\tb: #,\n\tc: 3,\n}")
+	require.Error(t, err)
+
+	fileError, ok := err.(*file.Error)
+	require.True(t, ok, "error should be of type *file.Error")
+	require.Equal(t, "unexpected token Operator(\"#\") (3:5)\n |  b: #,\n | ....^", fileError.Error())
+	require.Equal(t, 4, fileError.Column)
+	require.Equal(t, 3, fileError.Line)
 }
 
 func TestIssue105(t *testing.T) {
@@ -2200,43 +2318,16 @@ func TestEval_slices_out_of_bound(t *testing.T) {
 	}
 }
 
-func TestMemoryBudget(t *testing.T) {
-	tests := []struct {
-		code string
-	}{
-		{`map(1..100, {map(1..100, {map(1..100, {0})})})`},
-		{`len(1..10000000)`},
+func TestExpr_timeout(t *testing.T) {
+	tests := []struct{ code string }{
+		{`-999999..999999`},
+		{`map(1..999999, 1..999999)`},
+		{`map(1..999999, repeat('a', #))`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.code, func(t *testing.T) {
 			program, err := expr.Compile(tt.code)
-			require.NoError(t, err, "compile error")
-
-			_, err = expr.Run(program, nil)
-			assert.Error(t, err, "run error")
-			assert.Contains(t, err.Error(), "memory budget exceeded")
-		})
-	}
-}
-
-func TestExpr_custom_tests(t *testing.T) {
-	f, err := os.Open("custom_tests.json")
-	if os.IsNotExist(err) {
-		t.Skip("no custom tests")
-		return
-	}
-
-	require.NoError(t, err, "open file error")
-	defer f.Close()
-
-	var tests []string
-	err = json.NewDecoder(f).Decode(&tests)
-	require.NoError(t, err, "decode json error")
-
-	for id, tt := range tests {
-		t.Run(fmt.Sprintf("line %v", id+2), func(t *testing.T) {
-			program, err := expr.Compile(tt)
 			require.NoError(t, err)
 
 			timeout := make(chan bool, 1)
@@ -2291,86 +2382,6 @@ func TestIssue432(t *testing.T) {
 	out, err := expr.Run(program, env)
 	assert.NoError(t, err)
 	assert.Equal(t, float64(10), out)
-}
-
-func TestIssue461(t *testing.T) {
-	type EnvStr string
-	type EnvField struct {
-		S   EnvStr
-		Str string
-	}
-	type Env struct {
-		S        EnvStr
-		Str      string
-		EnvField EnvField
-	}
-	var tests = []struct {
-		input string
-		env   Env
-		want  bool
-	}{
-		{
-			input: "Str == S",
-			env:   Env{S: "string", Str: "string"},
-			want:  false,
-		},
-		{
-			input: "Str == Str",
-			env:   Env{Str: "string"},
-			want:  true,
-		},
-		{
-			input: "S == S",
-			env:   Env{Str: "string"},
-			want:  true,
-		},
-		{
-			input: `Str == "string"`,
-			env:   Env{Str: "string"},
-			want:  true,
-		},
-		{
-			input: `S == "string"`,
-			env:   Env{Str: "string"},
-			want:  false,
-		},
-		{
-			input: "EnvField.Str == EnvField.S",
-			env:   Env{EnvField: EnvField{S: "string", Str: "string"}},
-			want:  false,
-		},
-		{
-			input: "EnvField.Str == EnvField.Str",
-			env:   Env{EnvField: EnvField{Str: "string"}},
-			want:  true,
-		},
-		{
-			input: "EnvField.S == EnvField.S",
-			env:   Env{EnvField: EnvField{Str: "string"}},
-			want:  true,
-		},
-		{
-			input: `EnvField.Str == "string"`,
-			env:   Env{EnvField: EnvField{Str: "string"}},
-			want:  true,
-		},
-		{
-			input: `EnvField.S == "string"`,
-			env:   Env{EnvField: EnvField{Str: "string"}},
-			want:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			program, err := expr.Compile(tt.input, expr.Env(tt.env), expr.AsBool())
-
-			out, err := expr.Run(program, tt.env)
-			require.NoError(t, err)
-
-			require.Equal(t, tt.want, out)
-		})
-	}
 }
 
 func TestIssue462(t *testing.T) {
@@ -2735,4 +2746,140 @@ func TestExpr_env_types_map_error(t *testing.T) {
 
 	_, err = expr.Run(program, envTypes)
 	require.Error(t, err)
+}
+
+func TestIssue758_filter_map_index(t *testing.T) {
+	env := map[string]interface{}{}
+
+	exprStr := `
+        let a_map = 0..5 | filter(# % 2 == 0) | map(#index);
+        let b_filter = 0..5 | filter(# % 2 == 0);
+        let b_map = b_filter | map(#index);
+        [a_map, b_map]
+    `
+
+	result, err := expr.Eval(exprStr, env)
+	require.NoError(t, err)
+
+	expected := []interface{}{
+		[]interface{}{0, 1, 2},
+		[]interface{}{0, 1, 2},
+	}
+
+	require.Equal(t, expected, result)
+}
+
+func TestExpr_wierd_cases(t *testing.T) {
+	env := map[string]any{}
+
+	_, err := expr.Compile(`A(A)`, expr.Env(env))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown name A")
+}
+
+func TestIssue785_get_nil(t *testing.T) {
+	exprStrs := []string{
+		`get(nil, "a")`,
+		`get({}, "a")`,
+		`get(nil, "a")`,
+		`get({}, "a")`,
+		`({} | get("a") | get("b"))`,
+	}
+
+	for _, exprStr := range exprStrs {
+		t.Run("get returns nil", func(t *testing.T) {
+			env := map[string]interface{}{}
+
+			result, err := expr.Eval(exprStr, env)
+			require.NoError(t, err)
+
+			require.Equal(t, nil, result)
+		})
+	}
+}
+
+func TestMaxNodes(t *testing.T) {
+	maxNodes := uint(100)
+
+	code := ""
+	for i := 0; i < int(maxNodes); i++ {
+		code += "1; "
+	}
+
+	_, err := expr.Compile(code, expr.MaxNodes(maxNodes))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum allowed nodes")
+
+	_, err = expr.Compile(code, expr.MaxNodes(maxNodes+1))
+	require.NoError(t, err)
+}
+
+func TestMaxNodesDisabled(t *testing.T) {
+	code := ""
+	for i := 0; i < 2*int(conf.DefaultMaxNodes); i++ {
+		code += "1; "
+	}
+
+	_, err := expr.Compile(code, expr.MaxNodes(0))
+	require.NoError(t, err)
+}
+
+func TestMemoryBudget(t *testing.T) {
+	tests := []struct {
+		code string
+		max  int
+	}{
+		{`map(1..100, {map(1..100, {map(1..100, {0})})})`, -1},
+		{`len(1..10000000)`, -1},
+		{`1..100`, 100},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			program, err := expr.Compile(tt.code)
+			require.NoError(t, err, "compile error")
+
+			vm := vm.VM{}
+			if tt.max > 0 {
+				vm.MemoryBudget = uint(tt.max)
+			}
+			_, err = vm.Run(program, nil)
+			require.Error(t, err, "run error")
+			assert.Contains(t, err.Error(), "memory budget exceeded")
+		})
+	}
+}
+
+func TestIssue802(t *testing.T) {
+	prog, err := expr.Compile(`arr[1:2][0]`)
+	if err != nil {
+		t.Fatalf("error compiling program: %v", err)
+	}
+	val, err := expr.Run(prog, map[string]any{
+		"arr": [5]int{0, 1, 2, 3, 4},
+	})
+	if err != nil {
+		t.Fatalf("error running program: %v", err)
+	}
+	valInt, ok := val.(int)
+	if !ok || valInt != 1 {
+		t.Fatalf("invalid result, expected 1, got %v", val)
+	}
+}
+
+func TestIssue807(t *testing.T) {
+	type MyStruct struct {
+		nonExported string
+	}
+	out, err := expr.Eval(` "nonExported" in $env `, MyStruct{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b, ok := out.(bool)
+	if !ok {
+		t.Fatalf("expected boolean type, got %T: %v", b, b)
+	}
+	if b {
+		t.Fatalf("expected 'in' operator to return false for unexported field")
+	}
 }

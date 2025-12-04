@@ -16,6 +16,7 @@ type OperatorOverloading struct {
 	Env       *nature.Nature      // Env type.
 	Functions conf.FunctionsTable // Env functions.
 	applied   bool                // Flag to indicate if any changes were made to the tree.
+	NtCache   *nature.Cache
 }
 
 func (p *OperatorOverloading) Visit(node *ast.Node) {
@@ -43,6 +44,11 @@ func (p *OperatorOverloading) Visit(node *ast.Node) {
 	}
 }
 
+// Tracking must be reset before every walk over the AST tree
+func (p *OperatorOverloading) Reset() {
+	p.applied = false
+}
+
 func (p *OperatorOverloading) ShouldRepeat() bool {
 	return p.applied
 }
@@ -57,7 +63,7 @@ func (p *OperatorOverloading) FindSuitableOperatorOverload(l, r reflect.Type) (r
 
 func (p *OperatorOverloading) findSuitableOperatorOverloadInTypes(l, r reflect.Type) (reflect.Type, string, bool) {
 	for _, fn := range p.Overloads {
-		fnType, ok := p.Env.Get(fn)
+		fnType, ok := p.Env.Get(p.NtCache, fn)
 		if !ok {
 			continue
 		}
@@ -104,7 +110,7 @@ func checkTypeSuits(t reflect.Type, l reflect.Type, r reflect.Type, firstInIndex
 
 func (p *OperatorOverloading) Check() {
 	for _, fn := range p.Overloads {
-		fnType, foundType := p.Env.Get(fn)
+		fnType, foundType := p.Env.Get(p.NtCache, fn)
 		fnFunc, foundFunc := p.Functions[fn]
 		if !foundFunc && (!foundType || fnType.Type.Kind() != reflect.Func) {
 			panic(fmt.Errorf("function %s for %s operator does not exist in the environment", fn, p.Operator))

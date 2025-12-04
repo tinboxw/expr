@@ -5,6 +5,7 @@ import (
 	"math"
 	"reflect"
 	"regexp"
+	"runtime/debug"
 
 	"github.com/expr-lang/expr/ast"
 	"github.com/expr-lang/expr/builtin"
@@ -24,7 +25,7 @@ const (
 func Compile(tree *parser.Tree, config *conf.Config) (program *Program, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%v", r)
+			err = fmt.Errorf("%v\n%s", r, debug.Stack())
 		}
 	}()
 
@@ -34,6 +35,12 @@ func Compile(tree *parser.Tree, config *conf.Config) (program *Program, err erro
 		constantsIndex: make(map[any]int),
 		functionsIndex: make(map[string]int),
 		debugInfo:      make(map[string]string),
+	}
+
+	if config != nil {
+		c.ntCache = &c.config.NtCache
+	} else {
+		c.ntCache = new(Cache)
 	}
 
 	c.compile(tree.Node)
@@ -74,6 +81,7 @@ func Compile(tree *parser.Tree, config *conf.Config) (program *Program, err erro
 
 type compiler struct {
 	config         *conf.Config
+	ntCache        *Cache
 	locations      []file.Location
 	bytecode       []Opcode
 	variables      int
@@ -266,6 +274,8 @@ func (c *compiler) compile(node ast.Node) {
 		c.PointerNode(n)
 	case *ast.VariableDeclaratorNode:
 		c.VariableDeclaratorNode(n)
+	case *ast.SequenceNode:
+		c.SequenceNode(n)
 	case *ast.ConditionalNode:
 		c.ConditionalNode(n)
 	case *ast.ArrayNode:
@@ -300,12 +310,12 @@ func (c *compiler) IdentifierNode(node *ast.IdentifierNode) {
 
 	if env.IsFastMap() {
 		c.emit(OpLoadFast, c.addConstant(node.Value))
-	} else if ok, index, name := checker.FieldIndex(env, node); ok {
+	} else if ok, index, name := checker.FieldIndex(c.ntCache, env, node); ok {
 		c.emit(OpLoadField, c.addConstant(&runtime.Field{
 			Index: index,
 			Path:  []string{name},
 		}))
-	} else if ok, index, name := checker.MethodIndex(env, node); ok {
+	} else if ok, index, name := checker.MethodIndex(c.ntCache, env, node); ok {
 		c.emit(OpLoadMethod, c.addConstant(&runtime.Method{
 			Name:  name,
 			Index: index,
@@ -651,7 +661,7 @@ func (c *compiler) MemberNode(node *ast.MemberNode) {
 		env = c.config.Env
 	}
 
-	if ok, index, name := checker.MethodIndex(env, node); ok {
+	if ok, index, name := checker.MethodIndex(c.ntCache, env, node); ok {
 		c.compile(node.Node)
 		c.emit(OpMethod, c.addConstant(&runtime.Method{
 			Name:  name,
@@ -662,14 +672,14 @@ func (c *compiler) MemberNode(node *ast.MemberNode) {
 	op := OpFetch
 	base := node.Node
 
-	ok, index, nodeName := checker.FieldIndex(env, node)
+	ok, index, nodeName := checker.FieldIndex(c.ntCache, env, node)
 	path := []string{nodeName}
 
 	if ok {
 		op = OpFetchField
 		for !node.Optional {
 			if ident, isIdent := base.(*ast.IdentifierNode); isIdent {
-				if ok, identIndex, name := checker.FieldIndex(env, ident); ok {
+				if ok, identIndex, name := checker.FieldIndex(c.ntCache, env, ident); ok {
 					index = append(identIndex, index...)
 					path = append([]string{name}, path...)
 					c.emitLocation(ident.Location(), OpLoadField, c.addConstant(
@@ -680,7 +690,7 @@ func (c *compiler) MemberNode(node *ast.MemberNode) {
 			}
 
 			if member, isMember := base.(*ast.MemberNode); isMember {
-				if ok, memberIndex, name := checker.FieldIndex(env, member); ok {
+				if ok, memberIndex, name := checker.FieldIndex(c.ntCache, env, member); ok {
 					index = append(memberIndex, index...)
 					path = append([]string{name}, path...)
 					node = member
@@ -741,24 +751,22 @@ func (c *compiler) CallNode(node *ast.CallNode) {
 				}
 			}
 		case *ast.IdentifierNode:
-			if t, ok := c.config.Env.MethodByName(callee.Value); ok && t.Method {
+			if t, ok := c.config.Env.MethodByName(c.ntCache, callee.Value); ok && t.Method {
 				fnInOffset = 1
 				fnNumIn--
 			}
 		}
 		for i, arg := range node.Arguments {
 			c.compile(arg)
-			if k := kind(arg.Type()); k == reflect.Ptr || k == reflect.Interface {
-				var in reflect.Type
-				if fn.IsVariadic() && i >= fnNumIn-1 {
-					in = fn.In(fn.NumIn() - 1).Elem()
-				} else {
-					in = fn.In(i + fnInOffset)
-				}
-				if k = kind(in); k != reflect.Ptr && k != reflect.Interface {
-					c.emit(OpDeref)
-				}
+
+			var in reflect.Type
+			if fn.IsVariadic() && i >= fnNumIn-1 {
+				in = fn.In(fn.NumIn() - 1).Elem()
+			} else {
+				in = fn.In(i + fnInOffset)
 			}
+
+			c.derefParam(in, arg)
 		}
 	} else {
 		for _, arg := range node.Arguments {
@@ -776,12 +784,16 @@ func (c *compiler) CallNode(node *ast.CallNode) {
 	}
 	c.compile(node.Callee)
 
-	isMethod, _, _ := checker.MethodIndex(c.config.Env, node.Callee)
-	if index, ok := checker.TypedFuncIndex(node.Callee.Type(), isMethod); ok {
-		c.emit(OpCallTyped, index)
-		return
-	} else if checker.IsFastFunc(node.Callee.Type(), isMethod) {
-		c.emit(OpCallFast, len(node.Arguments))
+	if c.config != nil {
+		isMethod, _, _ := checker.MethodIndex(c.ntCache, c.config.Env, node.Callee)
+		if index, ok := checker.TypedFuncIndex(node.Callee.Type(), isMethod); ok {
+			c.emit(OpCallTyped, index)
+			return
+		} else if checker.IsFastFunc(node.Callee.Type(), isMethod) {
+			c.emit(OpCallFast, len(node.Arguments))
+		} else {
+			c.emit(OpCall, len(node.Arguments))
+		}
 	} else {
 		c.emit(OpCall, len(node.Arguments))
 	}
@@ -791,6 +803,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 	switch node.Name {
 	case "all":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		var loopBreak int
 		c.emitLoop(func() {
@@ -805,6 +818,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "none":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		var loopBreak int
 		c.emitLoop(func() {
@@ -820,6 +834,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "any":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		var loopBreak int
 		c.emitLoop(func() {
@@ -834,6 +849,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "one":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		c.emitLoop(func() {
 			c.compile(node.Arguments[1])
@@ -849,6 +865,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "filter":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		c.emitLoop(func() {
 			c.compile(node.Arguments[1])
@@ -868,6 +885,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "map":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		c.emitLoop(func() {
 			c.compile(node.Arguments[1])
@@ -879,6 +897,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "count":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		c.emitLoop(func() {
 			if len(node.Arguments) == 2 {
@@ -896,6 +915,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "sum":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		c.emit(OpInt, 0)
 		c.emit(OpSetAcc)
@@ -915,6 +935,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "find":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		var loopBreak int
 		c.emitLoop(func() {
@@ -942,6 +963,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "findIndex":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		var loopBreak int
 		c.emitLoop(func() {
@@ -960,6 +982,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "findLast":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		var loopBreak int
 		c.emitLoopBackwards(func() {
@@ -987,6 +1010,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "findLastIndex":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		var loopBreak int
 		c.emitLoopBackwards(func() {
@@ -1005,6 +1029,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "groupBy":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		c.emit(OpCreate, 1)
 		c.emit(OpSetAcc)
@@ -1018,6 +1043,7 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "sortBy":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		if len(node.Arguments) == 3 {
 			c.compile(node.Arguments[2])
@@ -1036,9 +1062,11 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	case "reduce":
 		c.compile(node.Arguments[0])
+		c.derefInNeeded(node.Arguments[0])
 		c.emit(OpBegin)
 		if len(node.Arguments) == 3 {
 			c.compile(node.Arguments[2])
+			c.derefInNeeded(node.Arguments[2])
 			c.emit(OpSetAcc)
 		} else {
 			c.emit(OpPointer)
@@ -1057,8 +1085,19 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 
 	if id, ok := builtin.Index[node.Name]; ok {
 		f := builtin.Builtins[id]
-		for _, arg := range node.Arguments {
+		for i, arg := range node.Arguments {
 			c.compile(arg)
+			argType := arg.Type()
+			if argType.Kind() == reflect.Ptr || arg.Nature().IsUnknown(c.ntCache) {
+				if f.Deref == nil {
+					// By default, builtins expect arguments to be dereferenced.
+					c.emit(OpDeref)
+				} else {
+					if f.Deref(i, argType) {
+						c.emit(OpDeref)
+					}
+				}
+			}
 		}
 
 		if f.Fast != nil {
@@ -1142,6 +1181,15 @@ func (c *compiler) VariableDeclaratorNode(node *ast.VariableDeclaratorNode) {
 	c.endScope()
 }
 
+func (c *compiler) SequenceNode(node *ast.SequenceNode) {
+	for i, n := range node.Nodes {
+		c.compile(n)
+		if i < len(node.Nodes)-1 {
+			c.emit(OpPop)
+		}
+	}
+}
+
 func (c *compiler) beginScope(name string, index int) {
 	c.scopes = append(c.scopes, scope{name, index})
 }
@@ -1203,6 +1251,18 @@ func (c *compiler) derefInNeeded(node ast.Node) {
 	}
 	switch node.Type().Kind() {
 	case reflect.Ptr, reflect.Interface:
+		c.emit(OpDeref)
+	}
+}
+
+func (c *compiler) derefParam(in reflect.Type, param ast.Node) {
+	if param.Nature().Nil {
+		return
+	}
+	if param.Type().AssignableTo(in) {
+		return
+	}
+	if in.Kind() != reflect.Ptr && param.Type().Kind() == reflect.Ptr {
 		c.emit(OpDeref)
 	}
 }

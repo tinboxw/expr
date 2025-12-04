@@ -1,6 +1,7 @@
 package checker_test
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -133,8 +134,10 @@ func TestCheck(t *testing.T) {
 		{"Bool ?? Bool"},
 		{"let foo = 1; foo == 1"},
 		{"(Embed).EmbedPointerEmbedInt > 0"},
+		{"(true ? [1] : [[1]])[0][0] == 1"},
 	}
 
+	c := new(checker.Checker)
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			var err error
@@ -144,7 +147,7 @@ func TestCheck(t *testing.T) {
 			config := conf.New(mock.Env{})
 			expr.AsBool()(config)
 
-			_, err = checker.Check(tree, config)
+			_, err = c.Check(tree, config)
 			assert.NoError(t, err)
 		})
 	}
@@ -671,14 +674,23 @@ invalid operation: > (mismatched types string and int) (1:30)
  | .............................^
 `,
 		},
+		{
+			`1; 2 + true; 3`,
+			`
+invalid operation: + (mismatched types int and bool) (1:6)
+ | 1; 2 + true; 3
+ | .....^
+`,
+		},
 	}
 
+	c := new(checker.Checker)
 	for _, tt := range errorTests {
 		t.Run(tt.code, func(t *testing.T) {
 			tree, err := parser.Parse(tt.code)
 			require.NoError(t, err)
 
-			_, err = checker.Check(tree, conf.New(mock.Env{}))
+			_, err = c.Check(tree, conf.New(mock.Env{}))
 			if err == nil {
 				err = fmt.Errorf("<nil>")
 			}
@@ -749,8 +761,8 @@ func TestCheck_TaggedFieldName(t *testing.T) {
 
 	config := conf.CreateNew()
 	expr.Env(struct {
-		x struct {
-			y bool `expr:"bar"`
+		X struct {
+			Y bool `expr:"bar"`
 		} `expr:"foo"`
 	}{})(config)
 	expr.AsBool()(config)
@@ -830,6 +842,7 @@ func TestCheck_TypeWeights(t *testing.T) {
 		"Float32": float32(11),
 		"Float64": float64(12),
 	}
+	c := new(checker.Checker)
 	for a := range types {
 		for b := range types {
 			tree, err := parser.Parse(fmt.Sprintf("%s + %s", a, b))
@@ -837,7 +850,7 @@ func TestCheck_TypeWeights(t *testing.T) {
 
 			config := conf.New(types)
 
-			_, err = checker.Check(tree, config)
+			_, err = c.Check(tree, config)
 			require.NoError(t, err)
 		}
 	}
@@ -917,6 +930,7 @@ func TestCheck_Function_types_are_checked(t *testing.T) {
 
 	config := conf.CreateNew()
 	add(config)
+	c := new(checker.Checker)
 
 	tests := []string{
 		"add(1)",
@@ -929,7 +943,7 @@ func TestCheck_Function_types_are_checked(t *testing.T) {
 			tree, err := parser.Parse(test)
 			require.NoError(t, err)
 
-			_, err = checker.Check(tree, config)
+			_, err = c.Check(tree, config)
 			require.NoError(t, err)
 			require.Equal(t, reflect.Int, tree.Node.Type().Kind())
 		})
@@ -939,7 +953,7 @@ func TestCheck_Function_types_are_checked(t *testing.T) {
 		tree, err := parser.Parse("add(1, '2')")
 		require.NoError(t, err)
 
-		_, err = checker.Check(tree, config)
+		_, err = c.Check(tree, config)
 		require.Error(t, err)
 		require.Equal(t, "cannot use string as argument (type int) to call add  (1:8)\n | add(1, '2')\n | .......^", err.Error())
 	})
@@ -1037,12 +1051,13 @@ func TestCheck_env_keyword(t *testing.T) {
 		{`$env[name]`, reflect.Interface},
 	}
 
+	c := new(checker.Checker)
 	for _, test := range tests {
 		t.Run(test.input, func(t *testing.T) {
 			tree, err := parser.Parse(test.input)
 			require.NoError(t, err)
 
-			rtype, err := checker.Check(tree, conf.New(env))
+			rtype, err := c.Check(tree, conf.New(env))
 			require.NoError(t, err)
 			require.True(t, rtype.Kind() == test.want, fmt.Sprintf("expected %s, got %s", test.want, rtype.Kind()))
 		})
@@ -1055,19 +1070,44 @@ func TestCheck_builtin_without_call(t *testing.T) {
 		err   string
 	}{
 		{`len + 1`, "invalid operation: + (mismatched types func(...interface {}) (interface {}, error) and int) (1:5)\n | len + 1\n | ....^"},
-		{`string.A`, "type func(interface {}) string[string] is undefined (1:8)\n | string.A\n | .......^"},
+		{`string.A`, "type func(interface {}) string has no field A (1:8)\n | string.A\n | .......^"},
 	}
 
+	c := new(checker.Checker)
 	for _, test := range tests {
 		t.Run(test.input, func(t *testing.T) {
 			tree, err := parser.Parse(test.input)
 			require.NoError(t, err)
 
-			_, err = checker.Check(tree, conf.New(nil))
+			_, err = c.Check(tree, conf.New(nil))
 			require.Error(t, err)
 			require.Equal(t, test.err, err.Error())
 		})
 	}
+}
+
+func TestCheck_EmbeddedInterface(t *testing.T) {
+	t.Run("embedded interface lookup returns compile-error not panic", func(t *testing.T) {
+		type Env struct {
+			context.Context
+			Country string
+		}
+		type Wrapper struct {
+			Ctx Env
+		}
+
+		config := conf.New(Wrapper{
+			Ctx: Env{
+				Context: context.Background(),
+				Country: "TR",
+			},
+		})
+		expr.WithContext("Ctx")(config)
+
+		_, err := checker.ParseCheck("Ctx.C", config)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "has no field C")
+	})
 }
 
 func TestCheck_types(t *testing.T) {
@@ -1101,13 +1141,14 @@ func TestCheck_types(t *testing.T) {
 		{`arr | filter(.value contains "a") | filter(.value == 0)`, `invalid operation: == (mismatched types string and int)`},
 	}
 
+	c := new(checker.Checker)
 	for _, test := range tests {
 		t.Run(test.code, func(t *testing.T) {
 			tree, err := parser.Parse(test.code)
 			require.NoError(t, err)
 
 			config := conf.New(env)
-			_, err = checker.Check(tree, config)
+			_, err = c.Check(tree, config)
 			if test.err == noerr {
 				require.NoError(t, err)
 			} else {
