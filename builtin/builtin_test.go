@@ -26,6 +26,9 @@ func TestBuiltin(t *testing.T) {
 		"ArrayOfAny":      []any{1, "2", true},
 		"ArrayOfFoo":      []mock.Foo{{Value: "a"}, {Value: "b"}, {Value: "c"}},
 		"PtrArrayWithNil": &ArrayWithNil,
+		"Fail": func() any {
+			panic("Fail should not be invoked")
+		},
 	}
 
 	var tests = []struct {
@@ -53,6 +56,9 @@ func TestBuiltin(t *testing.T) {
 		{`float("5.5")`, 5.5},
 		{`pow(2,2)`, 4.0},
 		{`switch(ArrayOfInt?.[0]==1,2, ArrayOfInt?.[2]==33, 3, true, 0)`, 2},
+		{`switch(true, 1, Fail())`, 1},
+		{`switch(false, Fail(), true, 1)`, 1},
+		{`switch(false, 1, len(ArrayOfString))`, 3},
 		{`string(5)`, "5"},
 		{`string(5.5)`, "5.5"},
 		{`string("5.5")`, "5.5"},
@@ -181,6 +187,8 @@ func TestBuiltin_works_with_any(t *testing.T) {
 		"get":    {2},
 		"take":   {2},
 		"sortBy": {2},
+		"pow":    {2},
+		"switch": {2},
 	}
 
 	for _, b := range builtin.Builtins {

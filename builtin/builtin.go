@@ -195,25 +195,46 @@ var Builtins = []*Function{
 		},
 	},
 	{
-		// switch(bool(expr1), 1, bool(expr2), 2, ...)
+		// switch(bool(expr1), 1, bool(expr2), 2, ..., defaultValue?)
 		Name: "switch",
 		Func: func(args ...any) (any, error) {
-			for i := 0; i < len(args); i += 2 {
+			length := len(args)
+			if length == 0 {
+				return nil, nil
+			}
+
+			limit := length
+			var defaultValue any
+			if length%2 == 1 {
+				defaultValue = args[length-1]
+				limit--
+			}
+
+			for i := 0; i < limit; i += 2 {
 				if args[i].(bool) {
 					return args[i+1], nil
 				}
 			}
-			return nil, nil
+
+			return defaultValue, nil
 		},
 		Validate: func(args []reflect.Type) (reflect.Type, error) {
-			if len(args)%2 != 0 {
-				return anyType, fmt.Errorf("not enough arguments to call switch(expected a multiple of 2, got %d)", len(args))
+			if len(args) < 2 {
+				return anyType, fmt.Errorf("invalid number of arguments to call switch (expected at least 2, got %d)", len(args))
 			}
 
-			for i := 0; i < len(args); i += 2 {
+			limit := len(args)
+			if limit%2 == 1 {
+				limit--
+			}
+			if limit == 0 {
+				return anyType, fmt.Errorf("invalid number of arguments to call switch (expected at least one condition/value pair, got %d)", len(args))
+			}
+
+			for i := 0; i < limit; i += 2 {
 				arg := args[i]
 				switch kind(arg) {
-				case reflect.Bool:
+				case reflect.Bool, reflect.Interface:
 				default:
 					return anyType, fmt.Errorf("invalid argument for bool (type %s)", arg)
 				}

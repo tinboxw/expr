@@ -933,6 +933,36 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 		c.emit(OpEnd)
 		return
 
+	case "switch":
+		args := node.Arguments
+		limit := len(args)
+		hasDefault := limit%2 == 1
+		if hasDefault {
+			limit--
+		}
+
+		var exits []int
+		for i := 0; i < limit; i += 2 {
+			c.compile(args[i])
+			jumpFalse := c.emit(OpJumpIfFalse, placeholder)
+			c.emit(OpPop)
+			c.compile(args[i+1])
+			exits = append(exits, c.emit(OpJump, placeholder))
+			c.patchJump(jumpFalse)
+			c.emit(OpPop)
+		}
+
+		if hasDefault {
+			c.compile(args[len(args)-1])
+		} else {
+			c.emit(OpNil)
+		}
+
+		for _, exit := range exits {
+			c.patchJump(exit)
+		}
+		return
+
 	case "find":
 		c.compile(node.Arguments[0])
 		c.derefInNeeded(node.Arguments[0])
